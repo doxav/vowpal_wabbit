@@ -10,6 +10,7 @@ pregex = 'Y(es)?|T(rue)?|\+?1'
 nregex = 'No?|F(alse)?|0|-1'
 category_index = 0
 delimeter = ','
+skip_first_line = False
 
 def printhelp():
     print "\n" + sys.argv[0] + """ converts csv data into vw binary classifier training data.
@@ -26,6 +27,7 @@ Options:
                         if not defined will use 0
     -d <delimeter>     specifies boundaries used to separate csv columns
                          if not defined will use ',' 
+    -s                 skip first line (ie. header)
                         
 Examples:
     cat data.csv | ./vw-csv2bin -c 14 -p '>' -n '<' > training.vw
@@ -33,7 +35,7 @@ Examples:
 """
 
 try:
-   opts, args = getopt.getopt(sys.argv[1:],"hi:o:p:n:c:d:")
+   opts, args = getopt.getopt(sys.argv[1:],"hi:o:p:n:c:d:s")
 except getopt.GetoptError:
    printhelp()
    sys.exit(2)
@@ -53,6 +55,8 @@ for opt, arg in opts:
     category_index = int(arg)
   elif opt == '-d':
     delimeter = arg
+  elif opt == '-s':
+    skip_first_line = True
 
 if infilename:
     infile = open (infilename,'r')
@@ -62,6 +66,9 @@ if outfilename:
     outfile = open (outfilename,'w')
 
 for line in infile:
+  if skip_first_line:
+    skip_first_line = False
+    continue
   line = re.sub('\||:|\s', '', line) # Remove vertical bar, colon, space, and newline; unsupported by vw file format
   data = line.split(delimeter)
   category = data.pop(category_index)
