@@ -3,14 +3,22 @@
 # http://www.datamungeblog.com
 import re
 import sys, getopt
+import csv
+from datetime import datetime
 
 infilename = ''
 outfilename = ''
 pregex = 'Y(es)?|T(rue)?|\+?1'
 nregex = 'No?|F(alse)?|0|-1'
 category_index = 0
+tag_index = -1
 delimeter = ','
 skip_first_line = False
+use_write_thread = False
+counter = 0
+train = False
+categorical_colnums = []
+numerical_colnums = []
 
 def printhelp():
     print "\n" + sys.argv[0] + """ converts csv data into vw binary classifier training data.
@@ -19,23 +27,33 @@ Options:
     -h                 Print this help.
     -i <filename>      input file, if not defined will use stdin
     -o <filename>      output file, if not defined will use stdout
-    -p <regex>		   regex identifying positive side of binary classification
+    -p <regex>	       regex identifying positive side of binary classification
                         if not defined will use 'Y(es)?|T(rue)?|+?1'
     -n <regex>         regex identifying negative side of binary classification
                         if not defined will use 'No?|F(alse)?|0|-1'
     -c <integer>       csv column which binary classification resides
                         if not defined will use 0
+    --train            will not check validity of classification column
+    -t <integer>       csv column which a Tag resides
+    --numericals=<list of col numbers>       list of columns (col numbers separated by comma)
+                       to be detected as numericals
+                       any column not defined, will use autodetect mechanism
+    --categoricals=<list of col numbers>     list of columns (col numbers separated by comma) 
+                       to be detected as categoricals
+                       any colum not defined, will use autodetect mechanism
     -d <delimeter>     specifies boundaries used to separate csv columns
                          if not defined will use ',' 
     -s                 skip first line (ie. header)
+    --write-thread     use a separate thread for writing
                         
 Examples:
     cat data.csv | ./vw-csv2bin -c 14 -p '>' -n '<' > training.vw
     ./vw-csv2bin -i data.csv -o training.vw -d '\\t' -c 14 -p '>' -n '<'
 """
 
+# Args handling
 try:
-   opts, args = getopt.getopt(sys.argv[1:],"hi:o:p:n:c:d:s")
+   opts, args = getopt.getopt(sys.argv[1:],"hi:o:p:n:c:d:t:s", ["numericals=", "categoricals=", "train", "write-thread"])
 except getopt.GetoptError:
    printhelp()
    sys.exit(2)
@@ -53,80 +71,145 @@ for opt, arg in opts:
     nregex = arg
   elif opt == '-c':
     category_index = int(arg)
+  elif opt == '-t':
+    tag_index = int(arg)
   elif opt == '-d':
     delimeter = arg
   elif opt == '-s':
     skip_first_line = True
+  elif opt == '--train':
+    train = True
+  elif opt == '--write-thread':
+    use_write_thread = True
+  elif opt == '--numericals':
+    try: numerical_colnums.extend([int(index) for index in arg.split(',')])
+    except: sys.exit("malformed --numericals option list")
+  elif opt == '--categoricals':
+    try: categorical_colnums.extend([int(index) for index in arg.split(',')])
+    except: sys.exit("malformed --categoricals option list")
+
+if tag_index == category_index:
+  sys.exit("indexes for Tag and Classification cannot reside in the same column")
+
+# Shift col nums to match to new columns idx after poping the value corresponding to class or tag
+if len(numerical_colnums)>0:
+    numerical_colnums = [index if index < category_index else index-1 for index in numerical_colnums]
+    if tag_index > -1:
+        if tag_index > category_index: tag_index -= 1
+        #else: category_index -= 1
+        numerical_colnums = [index if index < tag_index else index-1 for index in numerical_colnums]
+if len(categorical_colnums)>0:
+    categorical_colnums = [index if index < category_index else index-1 for index in categorical_colnums]
+    if tag_index > -1:
+        if tag_index > category_index: tag_index -= 1
+        #else: category_index -= 1
+        categorical_colnums = [index if index < tag_index else index-1 for index in categorical_colnums]
 
 if infilename:
     infile = open (infilename,'r')
 else:
     infile = sys.stdin
+csv_reader = csv.reader(infile, delimiter=delimeter)
+
 if outfilename:
     outfile = open (outfilename,'w')
 
-for line in infile:
+if use_write_thread:
+  import threading, Queue
+
+  def writer_worker(writer_queue, output_file):
+      print "START csv_writer_worker - current queue length:", writer_queue.qsize()
+
+      while True:
+          try:
+              item = writer_queue.get(True, 10)
+          except Queue.Empty:
+              print "Queue EMPTY !? queue length:", writer_queue.qsize()
+              continue
+          except:
+              print "ERROR! in writer_worker while extracting queue", str(sys.exc_info()[1])
+              time.sleep(1)  # to avoid being flood in case of temporary issue
+              continue
+          # IF true: will process current status all opened tmp files NOW
+          if item[0] == 'EXIT':
+              print 'EXIT: writer_worker exits now'
+              sys.exit(0)
+              continue
+          else:
+              #print item[0]
+              output_file.write(item[0])
+              writer_queue.task_done()
+
+  write_queue = Queue.Queue()
+  t = threading.Thread(target=writer_worker, args=(write_queue, outfile))
+  t.daemon = True
+  t.start()
+
+start = datetime.now()
+
+for data in csv_reader:
   if skip_first_line:
     skip_first_line = False
     continue
-  line = re.sub('\||:|\s', '', line) # Remove vertical bar, colon, space, and newline; unsupported by vw file format
-  data = line.split(delimeter)
+
   category = data.pop(category_index)
-  if re.search(nregex, category): # regex for negative category
-    category = "-1"
-  elif re.search(pregex, category): # regex for positive category
+  if re.search(pregex, category): # regex for positive category
+    category = '1'
+  elif re.search(nregex, category): # regex for negative category
+    category = '-1'
+  elif train: # if no valid class but in train mode, set default positive value
     category = '1'
   else:
-    sys.exit("Regex did not match a record, exiting.\nPostive Regex: " + pregex + "\nNegative Regex: "+ nregex + "\nRecord:\n" + line)
-  outline = category + " | "
-  colnum = 0
-  for col in data:
-    colstr = str(colnum)
-    #col = re.sub(r'\s','',col) # remove all whitespace
-    if re.search('^(\-)?[0-9.]*$', col) or re.search('^(\-)?[0-9.]*e(\+|-)[0-9.]*$', col): # If the feature is a number, then give it a label
-      outline = outline + "f" + colstr + ":" + col + " "
-    else: # If the feature is a string, then let vw handle it directly
-      outline = outline + col + ' '
-    colnum = colnum + 1
-  outline = outline + "\n"
-  if outfilename:
-    outfile.write(outline)
+    sys.exit("Regex did not match a record, exiting.\nPostive Regex: " + pregex + "\nNegative Regex: "+ nregex + "\nRecord:\n" + str(data))
+
+  if tag_index > -1:
+    tag = data.pop(tag_index)
+    outline_array = [category, " '", tag, " |i "]
   else:
-    sys.stdout.write(outline)
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-     
+    outline_array = [category, "| "]
+
+  colnum = 0
+  categorical_array = [' | ']
+  for col in data:
+    if len(str(col)) > 0:
+      if colnum in categorical_colnums:
+        #outline_array.extend([col, ' '])
+        categorical_array.extend([col, ' '])
+      elif colnum in numerical_colnums:
+        outline_array.extend(['f', str(colnum), ':', col, ' '])
+      else:
+        colstr = str(colnum)
+        if re.search('^(\-)?[0-9.]*$', col) or re.search('^(\-)?[0-9.]*e(\+|-)[0-9.]*$', col): # If the feature is a number, then give it a label
+          #print "numerical col:", colstr
+          outline_array.extend(['f', colstr, ':', col, ' '])
+        else: # If the feature is a string, then let vw handle it directly
+          #print "categorical col:", colstr
+          categorical_array.extend([col, ' '])
+          # once a column is detected as a string/categorical it shouldn't be processed differently later on
+          categorical_colnums.append(colnum)
+
+    colnum = colnum + 1
+
+  if len(categorical_array) > 1:
+    outline_array.extend(categorical_array)
+  outline_array.extend("\n")
+
+  if outfilename:
+    if use_write_thread:
+      write_queue.put(("".join(outline_array), ))
+    else:
+      outfile.write("".join(outline_array))
+  else:
+    sys.stdout.write("".join(outline_array))
+
+  counter += 1
+
+  if outfilename and (counter % 50000 == 0):
+    print "%s line processed - time since start: %s"% (str(counter), str(datetime.now() - start))
+
+if use_write_thread:
+  write_queue.put(('EXIT', 0))
+  t.join(240)
+  t = None
+  write_queue = None
+
