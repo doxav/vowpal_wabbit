@@ -53,15 +53,9 @@ namespace BS {
         else
           counter--;
       }
-       
-      if(counter==0)
-        current_label = -1;
     }
     label_data& ld = *(label_data*)ec.ld;
-    if(counter == 0)//no majority exists
-      ld.prediction = 1;
-    else //will output majority if it exists
-      ld.prediction = current_label;
+    ld.prediction = current_label;
 
     ec.loss = (ld.prediction == ld.label) ? 0. : 1.;
   }
